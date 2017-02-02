@@ -4,7 +4,11 @@ require "logstash/inputs/jmx_pipe/version"
 require "logstash/inputs/base"
 require "logstash/namespace"
 
+require 'jdk_helper'
+
 class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
+  java_import javax.management.NotificationListener
+
   config_name 'jmx_pipe'
   milestone 1
 
@@ -22,6 +26,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
   public
   def register
     @stop_event = Concurrent::Event::new
+    @subscriptions_to_add = @subscriptions.clone
     #TODO Additional configuration validation
 
     require 'jmx4r'
@@ -29,15 +34,32 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
   end
 
   public
+  def stop
+    @stop_event.set
+  end
+
+  public
+  def teardown
+    @logger.info 'Shutting down.'
+    @interrupt
+    finished
+  end
+
+  public
   def run(queue)
     begin
+      @queue = queue
+
       #TODO If at startup the JMX process is unavailable or host unresolvable, we should probably still allow start
       #TODO If the JMX process disappears, the connection might need to be reestablished; try that out
+      #TODO Resubscribe to notifications when re-establishing the connection
       jmx_connection = make_connection
 
       event_context = @event_context || {}
       until @stop_called.true?
         begin
+          resubscribe_to_notifications jmx_connection
+
           queries.each do |query|
             any_commit_done = FALSE
             query['objects'].each_entry do |bean_name, attr_spec|
@@ -57,7 +79,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
                 end
                 if query['objects'].length == 1
                   # If we query only one object, it might be a wildcard query, so commit each one separately
-                  send_event_to_queue(queue, query['name'], values)
+                  send_event_to_queue(query['name'], values)
                   values = event_context.clone
                   any_commit_done = TRUE
                 end
@@ -67,7 +89,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
             end
             unless any_commit_done
               # This happens when we query by more than one object, or when there were no objects found
-              send_event_to_queue(queue, @host, query['name'], values)
+              send_event_to_queue(query['name'], values)
             end
           end
 
@@ -81,7 +103,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
     rescue LogStash::ShutdownSignal
       # ignored
     rescue Exception => e
-      @logger.error e.message + "\n " + e.backtrace.join("\n ")
+      @logger.error 'Cannot setup jmx_pipe, aborting:' + e.message + "\n " + e.backtrace.join("\n ")
     end
   end
 
@@ -94,76 +116,146 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
   end
 
   private
+  def resubscribe_to_notifications(jmx_connection)
+    @subscriptions_to_add.delete_if do |subscription|
+      begin
+        object_namespec = subscription['object']
+        subscription_name = subscription['name']
+        subscription_attributes = subscription['attributes']
+
+        jmx_objects = JMX::MBean.find_all_by_name object_namespec, :connection => jmx_connection
+        if jmx_objects.length == 0
+          @logger.info "No bean found for name #{object_namespec}; postponing notification subscription."
+          false
+        end
+
+        jmx_objects.each do |mbean|
+          @logger.debug "Successfully added notification listener to bean #{mbean.object_name}"
+          jmx_connection.addNotificationListener(
+              mbean.object_name,
+              JmxPipeNotificationListener.new(self, subscription_name, subscription_attributes),
+              nil,
+              nil)
+        end
+        true
+      rescue Exception => e
+        @logger.warn "Error while setting up a notification listener #{subscription_name}: " +
+                         e.message + "\n " + e.backtrace.join("\n ")
+        false
+      end
+    end
+  end
+
+  private
   def sleep_until_next_iteration
     sleep_time = @next_iteration - Time::now
     if sleep_time < 0
       skip_iterations = (-sleep_time / @polling_frequency).to_i
       @logger.warn ("Overshot the planned iteration time for #{(-sleep_time).to_s} seconds" +
           (skip_iterations > 0 ? ', skipping ' + skip_iterations.to_s + ' iterations' : '') +
-          '!')
+          ', querying immediately!')
       @next_iteration += skip_iterations * @polling_frequency
     end
 
-    @logger.debug "Sleeping for #{sleep_time.to_s} seconds."
-    @stop_event.wait(sleep_time) unless sleep_time < 0
+    if sleep_time > 0
+      @logger.debug "Sleeping for #{sleep_time.to_s} seconds."
+      @stop_event.wait(sleep_time)
+    end
     @next_iteration += @polling_frequency
-  end
-
-  public
-  def stop
-    @stop_event.set
   end
 
   private
   def query(jmx_connection, jmx_object, attr_spec, result_values)
-    attr_spec.each_entry do |attr_name, attr_alias|
+    attr_spec.each_entry do |attr_path, attr_alias|
+      attr_path_parts = attr_path.split('.')
+      attr_name = attr_path_parts[0]
       value = jmx_connection.getAttribute(jmx_object.object_name, attr_name)
 
-      if not value.nil? and value.instance_of? Java::JavaxManagementOpenmbean::CompositeDataSupport
-        value.each do |subvalue|
-          result_values[attr_alias + '_' + subvalue.to_s] = convert_single_value(value[subvalue])
+      convert_and_set(value, attr_alias, result_values, attr_path_parts[1..-1])
+    end
+  end
+
+  public
+  def handle_notification(notification, event_name, attributes)
+    begin
+      values = {:message => notification.getMessage}
+
+      attributes.each_entry do |attr_path, attr_alias|
+        attr_path_parts = attr_path.split('.')
+        convert_and_set(notification.getUserData, attr_alias, values, attr_path_parts)
+      end
+
+      send_event_to_queue(event_name, values)
+    rescue Exception => e
+      @logger.warn "Error handling notification #{event_name}: " + e.message + "\n " + e.backtrace.join("\n ")
+    end
+  end
+
+  class JmxPipeNotificationListener
+    java_implements javax.management.NotificationListener
+
+    def initialize(jmx_pipe, event_name, attributes)
+      @jmx_pipe = jmx_pipe
+      @event_name = event_name
+      @attributes = attributes
+    end
+
+    java_signature 'void handleNotification(javax.management.Notification, java.lang.Object)'
+    def handle_notification(notification, context)
+      @jmx_pipe.logger.debug "Handling notification #{@event_name}."
+      @jmx_pipe.handle_notification(notification, @event_name, @attributes)
+    end
+  end
+
+  private
+  def convert_and_set(value, attr_alias, result_values, path = [])
+    if not value.nil? and value.instance_of? Java::JavaxManagementOpenmbean::CompositeDataSupport
+      if path.nil? or path.empty?
+        value.each do |subattr_name|
+          convert_and_set(value[subattr_name], attr_alias + '_' + subattr_name, result_values, path[1..-1])
         end
       else
-        result_values[attr_alias] = convert_single_value(value)
+        subattr_name = path[0]
+        if value.contains_key?(subattr_name)
+          convert_and_set(value[subattr_name], attr_alias, result_values, path[1..-1])
+        else
+          @logger.warn "Parsing attribute #{attr_alias} failed: no field named #{subattr_name}"
+        end
+      end
+    else
+      #TODO Notification userData may be any sort of an object; maybe we should also check whether value is either a map or responds to the first path segment with a subvalue
+      if path.nil? or path.empty?
+        if value.nil?
+          return
+        end
+
+        number_type = [Fixnum, Bignum, Float]
+        boolean_type = [TrueClass, FalseClass]
+
+        if boolean_type.include?(value.class) then
+          value = value ? 1 : 0
+        end
+
+        result_values[attr_alias] = number_type.include?(value.class) ? value : value.to_s
+      else
+        @logger.warn "Parsing attribute #{attr_alias} failed: non-composite value observed when trying to traverse " +
+            "the leftover path: #{path.join('.')}"
       end
     end
   end
 
   private
-  def convert_single_value(value)
-    if value.nil?
-      return nil
-    end
-
-    number_type = [Fixnum, Bignum, Float]
-    boolean_type = [TrueClass, FalseClass]
-
-    if boolean_type.include?(value.class) then
-      value = value ? 1 : 0
-    end
-
-    return number_type.include?(value.class) ? value : value.to_s
-  end
-
-  private
-  def send_event_to_queue(queue, name, values)
-    @logger.debug('Send event to queue to be processed by filters/outputs')
+  def send_event_to_queue(name, values)
+    @logger.debug("Sending event #{name} to the logstash queue.")
     event = LogStash::Event.new
     event.set('host', @host)
     event.set('name', name)
 
     values.each do |key, value|
-      event.set(key, value) unless value.nil?
+      event.set(key.to_s, value) unless value.nil?
     end
 
     decorate(event)
-    queue << event
-  end
-
-  public
-  def teardown
-    @logger.debug 'Shutting down.'
-    @interrupt
-    finished
+    @queue << event
   end
 end
