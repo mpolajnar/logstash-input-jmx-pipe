@@ -38,6 +38,6 @@ Gem::Specification.new do |spec|
 
   spec.add_runtime_dependency 'jmx4r'
 
-  spec.add_development_dependency 'logstash-devutils'
   spec.add_development_dependency 'logstash-codec-plain'
+  spec.add_development_dependency 'logstash-output-stdout'
 end

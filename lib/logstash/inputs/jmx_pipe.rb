@@ -50,14 +50,12 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
     begin
       @queue = queue
 
-      #TODO If at startup the JMX process is unavailable or host unresolvable, we should probably still allow start
-      #TODO If the JMX process disappears, the connection might need to be reestablished; try that out
-      #TODO Resubscribe to notifications when re-establishing the connection
-      jmx_connection = make_connection
-
+      jmx_connection = nil
       event_context = @event_context || {}
       until @stop_called.true?
         begin
+          jmx_connection ||= make_connection
+
           resubscribe_to_notifications jmx_connection
 
           queries.each do |query|
@@ -92,12 +90,17 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
               send_event_to_queue(query['name'], values)
             end
           end
-
           sleep_until_next_iteration
         rescue LogStash::ShutdownSignal
           break
+        rescue Java::JavaRmi::ConnectException => e
+          @logger.error 'Connection lost; will try to reestablish in a second. Error was: ' + e.message + "\n " + e.backtrace.join("\n ")
+          jmx_connection = nil
+          @subscriptions_to_add = @subscriptions.clone
+          sleep(1)
         rescue Exception => e
           @logger.error e.message + "\n " + e.backtrace.join("\n ")
+          sleep_until_next_iteration
         end
       end
     rescue LogStash::ShutdownSignal
