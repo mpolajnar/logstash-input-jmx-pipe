@@ -178,7 +178,8 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
   public
   def handle_notification(notification, event_name, attributes)
     begin
-      values = {:message => notification.getMessage}
+      values = @event_context.nil? ? {} : @event_context.clone
+      values[:message] = notification.getMessage
 
       attributes.each_entry do |attr_path, attr_alias|
         attr_path_parts = attr_path.split('.')
