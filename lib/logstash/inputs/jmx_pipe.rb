@@ -25,17 +25,87 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
 
   public
   def register
+    @queries ||= []
+    @subscriptions ||= []
+
+    validation_result = validate_queries(@queries) || validate_subscriptions(@subscriptions)
+    unless validation_result.nil?
+      @logger.error validation_result
+      raise Exception::new validation_result
+    end
+
     @stop_event = Concurrent::Event::new
     @subscriptions_to_add = @subscriptions.clone
-    #TODO Additional configuration validation
 
     require 'jmx4r'
     @next_iteration = Time::now + polling_frequency
   end
 
+  private
+  def validate_queries(queries)
+    queries.each_with_index do |query, i|
+      unless query.respond_to?(:has_key?) and query.respond_to?(:each)
+        return "queries[#{i}] is not an object"
+      end
+      unless query.has_key?('name') and not query['name'].nil? and query['name'].instance_of? String
+        return "queries[#{i}].name missing or not a string"
+      end
+      unless query.has_key?('objects') and not query['objects'].nil? and query['objects'].respond_to?(:has_key?) and
+          query['objects'].respond_to?(:each) and query['objects'].respond_to?(:each_entry)
+        return "queries[#{i}].objects missing or not an object"
+      end
+      query['objects'].each_entry do |obj_name, attr_spec|
+        unless not obj_name.nil? and obj_name.instance_of? String
+          return "One of the queries[#{i}].objects key is not a string"
+        end
+        unless not attr_spec.nil? and attr_spec.respond_to?(:has_key?) and attr_spec.respond_to?(:each) and
+            attr_spec.respond_to?(:each_entry)
+          return "One of the queries[#{i}].objects key is not an object"
+        end
+        attr_spec.each_entry do |attr_path, attr_alias|
+          unless not attr_path.nil? and attr_path.instance_of? String
+            return "One of the queries[#{i}].objects[#{attr_path}] keys is not a string"
+          end
+          unless not attr_alias.nil? and attr_alias.instance_of? String
+            return "One of the queries[#{i}].objects[#{attr_path}] values is not a string"
+          end
+        end
+      end
+    end
+    nil
+  end
+
+  private
+  def validate_subscriptions(subscriptions)
+    subscriptions.each_with_index do |subscription, i|
+      unless subscription.respond_to?(:has_key?) and subscription.respond_to?(:each)
+        return "subscriptions[#{i}] is not an object"
+      end
+      unless subscription.has_key?('name') and not subscription['name'].nil? and subscription['name'].instance_of? String
+        return "subscriptions[#{i}].name missing or not a string"
+      end
+      unless subscription.has_key?('object') and not subscription['object'].nil? and subscription['object'].instance_of? String
+        return "subscriptions[#{i}].object missing or not a string"
+      end
+      unless subscription.has_key?('attributes') and not subscription['attributes'].nil? and subscription['attributes'].respond_to?(:has_key?) and
+          subscription['attributes'].respond_to?(:each) and subscription['attributes'].respond_to?(:each_entry)
+        return "subscriptions[#{i}].attributes missing or not an object"
+      end
+      subscription['attributes'].each_entry do |attr_path, attr_alias|
+        unless not attr_path.nil? and attr_path.instance_of? String
+          return "One of the subscriptions[#{i}].attributes[#{attr_path}] keys is not a string"
+        end
+        unless not attr_alias.nil? and attr_alias.instance_of? String
+          return "One of the subscriptions[#{i}].attributes[#{attr_path}] values is not a string"
+        end
+      end
+    end
+    nil
+  end
+
   public
   def stop
-    @stop_event.set
+    @stop_event.set unless @stop_event.nil?
   end
 
   public
@@ -58,7 +128,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
 
           resubscribe_to_notifications jmx_connection
 
-          queries.each do |query|
+          @queries.each do |query|
             any_commit_done = FALSE
             query['objects'].each_entry do |bean_name, attr_spec|
               values = event_context.clone
