@@ -5,7 +5,7 @@ require 'logstash/inputs/jmx_pipe/version'
 
 Gem::Specification.new do |spec|
   spec.name          = 'logstash-input-jmx-pipe'
-  spec.version       = LogStash::Inputs::JmxPipe::VERSION
+  spec.version       = '0.1.0'
   spec.authors       = ['Matija Polajnar, Marand d.o.o.']
   spec.email         = ['matija.polajnar@gmail.com', 'info@marand.si']
   spec.licenses      = ['Apache License (2.0)']
