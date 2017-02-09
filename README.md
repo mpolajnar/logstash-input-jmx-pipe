@@ -2,7 +2,7 @@
 
 This is a plugin for [Logstash](https://github.com/elastic/logstash).
 
-We did not yet decide on the licence, so only Marand d.o.o. employees and subcontractors are not allowed to run, read or modify it!
+It is fully free and fully open source. The license is Apache 2.0, meaning you are pretty much free to use it however you want in whatever way.
 
 ## Documentation
 
@@ -52,4 +52,4 @@ bin/plugin install --no-verify
 
 ## Contributing
 
-TBD
+We lack the manpower to implement any ideas you might have, however, we will try to accept merge requests if we deem your contribution useful and well made. This plugin is currently lacking documentation and test coverage, so contributions on this front are also most welcome.

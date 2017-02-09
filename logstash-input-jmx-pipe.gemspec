@@ -5,9 +5,10 @@ require 'logstash/inputs/jmx_pipe/version'
 
 Gem::Specification.new do |spec|
   spec.name          = 'logstash-input-jmx-pipe'
-  spec.version       = '0.1.0'
+  spec.version       = LogStash::Inputs::JmxPipe::VERSION
   spec.authors       = ['Matija Polajnar, Marand d.o.o.']
   spec.email         = ['matija.polajnar@gmail.com', 'info@marand.si']
+  spec.licenses      = ['Apache License (2.0)']
 
   spec.summary       = 'Retrieve metrics subscribe to notifications from a single JMX source.'
   spec.description   = 'This gem is a Logstash plugin required to be installed on top of the Logstash core pipeline using $LS_HOME/bin/logstash-plugin install gemname. This gem is not a stand-alone program'
