@@ -31,7 +31,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
     validation_result = validate_queries(@queries) || validate_subscriptions(@subscriptions)
     unless validation_result.nil?
       @logger.error validation_result
-      raise Exception::new validation_result
+      raise LogStash::ConfigurationError::new validation_result
     end
 
     @stop_event = Concurrent::Event::new
