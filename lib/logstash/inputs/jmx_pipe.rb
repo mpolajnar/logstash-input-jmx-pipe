@@ -8,6 +8,7 @@ require 'jdk_helper'
 
 class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
   java_import javax.management.NotificationListener
+  java_import javax.management.ObjectName
 
   config_name 'jmx_pipe'
   milestone 1
@@ -248,7 +249,15 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
     attr_spec.each_entry do |attr_path, attr_alias|
       attr_path_parts = attr_path.split('.')
       attr_name = attr_path_parts[0]
-      value = jmx_connection.getAttribute(jmx_object.object_name, attr_name)
+
+      if attr_name.start_with?('=')
+        value = jmx_object.object_name.getKeyProperty(attr_name[1..-1])
+        if value.start_with?('"')
+          value = javax.management.ObjectName.unquote(value)
+        end
+      else
+        value = jmx_connection.getAttribute(jmx_object.object_name, attr_name)
+      end
 
       convert_and_set(value, attr_alias, result_values, attr_path_parts[1..-1])
     end
