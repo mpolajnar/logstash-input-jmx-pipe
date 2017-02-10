@@ -1,10 +1,139 @@
 # encoding: utf-8
-require "logstash/inputs/jmx_pipe/version"
-
 require "logstash/inputs/base"
 require "logstash/namespace"
-
 require 'jdk_helper'
+require 'jmx4r'
+
+# A LogStash input plugin for connecting to JMX endpoints to periodically gather MBean attribute values and to subscribe
+# to JMX notifications and logging those as events.
+#
+# This plugin was written after logstash-input-jmx was found to be, in my opinion, not only insufficient (it lacks
+# notification subscription support) but also poorly designed. logstash-input-jmx_pipe does the following things differently:
+# * It has no outside configuration; all configuration is done within the logstash.conf file.
+# * It spawns no additional threads it would have to manage. Instead, user is required to configure multiple instanes of the
+#   plugin to monitor multiple JMX endpoints (or even if she wishes to distribute the load to multiple threads.)
+# * It allows (and indeed requires) original MBean attribute names to be specified, not the snake_cased_ones.
+# * It allows multiple MBeans to be queried to produce one logstash event, or, alternatively, querying multiple MBeans using
+#   wildcards and producing multiple events at once.
+# * It allows logging values from the MBean object name key-value property pairs.
+#
+# === Configuration
+# Let us start with an example of a configuration that makes use of all the functionality the plugin can offer.
+#
+# [source,ruby]
+# ----------------------------------
+#   jmx_pipe {
+#     type => "jmx_data"
+#     interval => 15000
+#     host => "10.10.10.10"
+#     port => 3000
+#     username => "monitorRole"
+#     password => "password"
+#     event_context => {
+#       server_name => "catalog-service"
+#     }
+#     queries => [
+#       {
+#         name => "Heap"
+#         objects => {
+#           "java.lang:type=Memory" => {
+#             "HeapMemoryUsage" => "Usage"
+#           }
+#         }
+#       },
+#       {
+#         name => "Load"
+#         objects => {
+#           "java.lang:type=OperatingSystem" => {
+#             "SystemCpuLoad" => "SystemCpuLoad"
+#             "SystemLoadAverage" => "SystemLoadAverage"
+#             "ProcessCpuLoad" => "ProcessCpuLoad"
+#             "AvailableProcessors" => "AvailableProcessors"
+#           }
+#         }
+#       }
+#     ]
+#     subscriptions => [
+#       {
+#         name => "GCEvent"
+#         object => "java.lang:type=GarbageCollector,name=*"
+#         attributes => {
+#           "gcAction" => "GCAction"
+#           "=name" => "GCName"
+#           "gcCause" => "GCCause"
+#           "gcInfo.duration" => "GCDuration"
+#         }
+#       }
+#     ]
+#   }
+# ----------------------------------
+#
+# A brief explanation of the configuration keys follows.
+#
+# * `type` may be used to modify the `_type` property of the events.
+# * `interval` is a polling interval in milliseconds for querying the MBean attribute values. Note that this interval does
+#   not include the time it takes to do the querying itself. If the querying ever takes a longer time than the given interval,
+#   the next iteration of querying will be done right after the one that took too long. That will also be the case should the
+#   querying take more than two times the length of the interval, however, effort will not be made to make up for all the
+#   missed iterations; all but the last one will be skipped. Such events are logged to the logstash log with a "warn"
+#   severity.
+# * `host` and `port` describe the target JMX endpoint. Only one endpoint can be observed using one instance of the plugin;
+#   configure more than one in the logstash.conf to query and/or subscribe to multiple JMX endpoints.
+# * `username` and `password` are optional. Required in case the JMX endpoint mandates authentication.
+# * `event_context` is an optional hash of properties to be appended to each emitted event.
+#
+# Those were the configuration keys to get the plugin ready for work, which is querying MBeans and subscribing to JMX
+# notifications. How to configure those operations is described in the following two subsections.
+#
+# ==== The `queries` configuration key
+#
+# For each hash in the (optional) `queries` list, the plugin will, in each iteration, query all the listed `objects` (keys of
+# the `objects` hash represent object name patterns). If any object is found, there are three possible situations:
+# * One or more object name patterns are listed in the `objects` hash and at most one of each is found. Then, a single event
+#   is emitted with the property `name` set to the value of the query's `name` configuration key. Other properties of the
+#   event contain values of the MBeans' attributes as the values of the `objects` has specify. Each entry in the hash for
+#   each object name pattern contains a mapping from MBean attribute name (as the key) to the LogStash event property name
+#   (as the value). `"ResourcesInUse" => "WebWorkerThreadsIsUse"` thus means the LogStash event will have a property named
+#   `WebWorkerThreadsInUse` that will carry the value of the `ResourceInUse` attribute of the found MBean.
+# * One object name pattern containing wildcard(s) is listed in the `objects` hash and multiple MBeans have been found. Then
+#   for each found object an event is emitted, carrying its attributes' values as properties as configured.
+# * Multiple object name patterns are listed in the `objects` hash, at least one containing a wildcard, and multiple
+#   MBeans have been found for at least one of the patterns. In this case, a warning is logged in the logstash log that only
+#   the first of those MBeans will be taken into account. Then, the plugin proceeds in the same way as if only one (ie.
+#   first) MBean had been found for each pattern.
+#
+# The MBean attribute name specified in the mapping can also be a simple expression to __climb down__ a composite value tree.
+# Properties of the composite value are accessed using a dot, i.e. `attribute.property.subproperty`. See the last paragraph
+# of the next subsection (about `subscriptions`) to see an example.
+#
+# ==== The `subscriptions` configuration key
+#
+# This plugin can subscribe to notifications that are emitted by the MBeans. At the moment, no filtering is supported.
+# Filtering can be done later in the LogStash pipeline, although that is hardly a good solution: there is a good reason the
+# JMX notification subscription mechanism natively supports filtering.
+#
+# `subscriptions` is an optional list of hashes with the following attributes.
+# * `name` is a string that is set as a value of the `name` property on each emitted LogStash event.
+# * `object` is an object name pattern for locating the object to which a subscription is to be made. Note that if multiple
+#   objects are found, a subscription is made to all of them!
+# * `attributes` is a hash that describes a mapping of notification attributes' names (the keys) to event property names
+#   (the values) in a similar fashion as the outermost hashes in the `objects` hash describe a mapping of the MBean attribute
+#   names.
+#
+# The notification attribute name specified in the mapping can also be a simple expression to __climb down__ a composite
+# value tree. Properties of the composite value are accessed using a dot, i.e. `attribute.property.subproperty`. In the
+# example, `gcInfo` is a composite value that, among others, contains a primitive value named `duration`.
+#
+# Note that we could also map the entire `gcInfo` without specifying one of its keys and the plugin will unpack the
+# `gcInfo`'s values to properties with underscores in names. We would advise against using this functionality.
+#
+# ==== Using a secure (SSL) JMX connection
+#
+# If the JMX endpoint requires a secure connection (which it should), the truststore with the server's public key must be
+# presented to the JVM in which LogStash runs. LogStash should be run with the following parameter in the `JAVA_OPTS`
+# environment variable: `-Djavax.net.ssl.trustStore=/etc/logstash/jmx.truststore`, where the given file is the truststore
+# with all the needed public keys.
+
 
 class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
   java_import javax.management.NotificationListener
@@ -19,7 +148,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
   config :port, :validate => :number, :required => true
   config :username, :validate => :string, :required => false
   config :password, :validate => :string, :required => false
-  config :polling_frequency, :validate => :number, :required => true
+  config :interval, :validate => :number, :required => true
   config :event_context, :validate => :hash, :required => false
   config :queries, :validate => :array, :required => false
   config :subscriptions, :validate => :array, :required => false
@@ -39,7 +168,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
     @subscriptions_to_add = @subscriptions.clone
 
     require 'jmx4r'
-    @next_iteration = Time::now + polling_frequency
+    @next_iteration = Time::now + @interval
   end
 
   private
@@ -230,18 +359,18 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
   def sleep_until_next_iteration
     sleep_time = @next_iteration - Time::now
     if sleep_time < 0
-      skip_iterations = (-sleep_time / @polling_frequency).to_i
+      skip_iterations = (-sleep_time / @interval).to_i
       @logger.warn ("Overshot the planned iteration time for #{(-sleep_time).to_s} seconds" +
           (skip_iterations > 0 ? ', skipping ' + skip_iterations.to_s + ' iterations' : '') +
           ', querying immediately!')
-      @next_iteration += skip_iterations * @polling_frequency
+      @next_iteration += skip_iterations * @interval
     end
 
     if sleep_time > 0
       @logger.debug "Sleeping for #{sleep_time.to_s} seconds."
       @stop_event.wait(sleep_time)
     end
-    @next_iteration += @polling_frequency
+    @next_iteration += @interval
   end
 
   private
@@ -332,7 +461,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
         result_values[attr_alias] = number_type.include?(value.class) ? value : value.to_s
       else
         @logger.warn "Parsing attribute #{attr_alias} failed: non-composite value observed when trying to traverse " +
-            "the leftover path: #{path.join('.')}"
+                         "the leftover path: #{path.join('.')}"
       end
     end
   end
