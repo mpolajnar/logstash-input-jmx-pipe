@@ -10,10 +10,10 @@ require 'jmx4r'
 # This plugin was written after logstash-input-jmx was found to be, in my opinion, not only insufficient (it lacks
 # notification subscription support) but also poorly designed. logstash-input-jmx_pipe does the following things differently:
 # * It has no outside configuration; all configuration is done within the logstash.conf file.
-# * It spawns no additional threads it would have to manage. Instead, user is required to configure multiple instanes of the
+# * It spawns no additional threads it would have to manage. Instead, user is required to configure multiple instances of the
 #   plugin to monitor multiple JMX endpoints (or even if she wishes to distribute the load to multiple threads.)
 # * It allows (and indeed requires) original MBean attribute names to be specified, not the snake_cased_ones.
-# * It allows multiple MBeans to be queried to produce one logstash event, or, alternatively, querying multiple MBeans using
+# * It allows multiple MBeans to be queried to produce one LogStash event, or, alternatively, querying multiple MBeans using
 #   wildcards and producing multiple events at once.
 # * It allows logging values from the MBean object name key-value property pairs.
 #
