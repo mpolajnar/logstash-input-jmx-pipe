@@ -141,7 +141,15 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
                   @logger.debug "Found #{jmx_objects.length} object(s) for #{bean_name}"
                 end
                 jmx_objects.each do |jmx_object|
-                  query(jmx_connection, jmx_object, attr_spec, values)
+                  begin
+                    query(jmx_connection, jmx_object, attr_spec, values)
+                  rescue LogStash::ShutdownSignal => e
+                    raise e
+                  rescue Java::JavaRmi::ConnectException => e
+                    raise e
+                  rescue Exception => e
+                    @logger.error 'Unable to process one of the JMX objects: ' + e.message + "\n " + e.backtrace.join("\n ")
+                  end
                 end
                 if query['objects'].length == 1
                   # If we query only one object, it might be a wildcard query, so commit each one separately
@@ -153,7 +161,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
                 @logger.warn "No jmx object found for #{bean_name}"
               end
             end
-            unless any_commit_done
+            unless any_commit_done or values.empty?
               # This happens when we query by more than one object, or when there were no objects found
               send_event_to_queue(query['name'], values)
             end
