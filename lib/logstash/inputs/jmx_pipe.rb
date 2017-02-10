@@ -150,12 +150,12 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
                   rescue Exception => e
                     @logger.error 'Unable to process one of the JMX objects: ' + e.message + "\n " + e.backtrace.join("\n ")
                   end
-                end
-                if query['objects'].length == 1
-                  # If we query only one object, it might be a wildcard query, so commit each one separately
-                  send_event_to_queue(query['name'], values)
-                  values = event_context.clone
-                  any_commit_done = TRUE
+                  if query['objects'].length == 1
+                    # If we query only one object, it might be a wildcard query, so commit each one separately
+                    send_event_to_queue(query['name'], values)
+                    values = event_context.clone
+                    any_commit_done = TRUE
+                  end
                 end
               else
                 @logger.warn "No jmx object found for #{bean_name}"
