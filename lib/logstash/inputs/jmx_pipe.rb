@@ -134,13 +134,11 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
               values = event_context.clone
               jmx_objects = JMX::MBean.find_all_by_name bean_name, :connection => jmx_connection
               if jmx_objects.length > 0
-                if jmx_objects.length > 0
-                  if query['objects'].length > 1
-                    @logger.warn "Found #{jmx_objects.length} object(s) for #{bean_name}; avoiding combinatorial explosion by only querying the 1st object!"
-                    jmx_objects = [jmx_objects[0]]
-                  else
-                    @logger.debug "Found #{jmx_objects.length} object(s) for #{bean_name}"
-                  end
+                if query['objects'].length > 1 and jmx_objects.length > 1
+                  @logger.warn "Found #{jmx_objects.length} object(s) for #{bean_name}; avoiding combinatorial explosion by only querying the 1st object!"
+                  jmx_objects = [jmx_objects[0]]
+                else
+                  @logger.debug "Found #{jmx_objects.length} object(s) for #{bean_name}"
                 end
                 jmx_objects.each do |jmx_object|
                   query(jmx_connection, jmx_object, attr_spec, values)
