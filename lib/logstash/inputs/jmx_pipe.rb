@@ -246,6 +246,10 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
 
   private
   def query(jmx_connection, jmx_object, attr_spec, result_values)
+    attr_names = attr_spec.select{|attr_path, _| not attr_path.start_with?('=')}.keys.map{|attr_path| attr_path.split('.')[0]}
+    attr_values = attr_names.empty? ? [] : values = jmx_connection.getAttributes(jmx_object.object_name, attr_names)
+    attr_values_hash = Hash[attr_values.collect{|a| [a.getName, a.getValue]}]
+
     attr_spec.each_entry do |attr_path, attr_alias|
       attr_path_parts = attr_path.split('.')
       attr_name = attr_path_parts[0]
@@ -256,7 +260,7 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
           value = javax.management.ObjectName.unquote(value)
         end
       else
-        value = jmx_connection.getAttribute(jmx_object.object_name, attr_name)
+        value = attr_values_hash[attr_name]
       end
 
       convert_and_set(value, attr_alias, result_values, attr_path_parts[1..-1])
