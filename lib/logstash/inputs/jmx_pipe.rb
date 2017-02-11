@@ -167,7 +167,6 @@ class LogStash::Inputs::JmxPipe < LogStash::Inputs::Base
     @stop_event = Concurrent::Event::new
     @subscriptions_to_add = @subscriptions.clone
 
-    require 'jmx4r'
     @next_iteration = Time::now + @interval
   end
 
